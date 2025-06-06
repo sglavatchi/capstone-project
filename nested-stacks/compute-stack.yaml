@@ -21,3 +21,377 @@ Parameters:
   AppSubnet1Id:
     Type: String
     Description: App Subnet 1 ID for Auto Scaling
+    
+  AppSubnet2Id:
+    Type: String
+    Description: App Subnet 2 ID for Auto Scaling
+    
+  ALBSecurityGroupId:
+    Type: String
+    Description: ALB Security Group ID
+    
+  AppSecurityGroupId:
+    Type: String
+    Description: App Security Group ID
+    
+  DatabaseEndpoint:
+    Type: String
+    Description: Database endpoint from Database Stack
+    
+  DatabaseName:
+    Type: String
+    Description: Database name
+    Default: WPDatabase
+    
+  EFSFileSystemId:
+    Type: String
+    Description: EFS File System ID from Storage Stack
+    
+  WordPressAdminPassword:
+    Type: String
+    NoEcho: true
+    Description: WordPress admin password
+    
+  WordPressAdminEmail:
+    Type: String
+    Description: WordPress admin email
+    
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+
+Resources:
+  # =============================================================================
+  # APPLICATION LOAD BALANCER
+  # =============================================================================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${EnvironmentName}-ALB'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1Id
+        - !Ref PublicSubnet2Id
+      SecurityGroups:
+        - !Ref ALBSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ALB'
+
+  # =============================================================================
+  # TARGET GROUP
+  # =============================================================================
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${EnvironmentName}-TG'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPCId
+      HealthCheckEnabled: true
+      HealthCheckPath: /wp-login.php
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 50
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 10
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-TargetGroup'
+
+  # =============================================================================
+  # LOAD BALANCER LISTENER
+  # =============================================================================
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # =============================================================================
+  # IAM ROLE FOR EC2 INSTANCES
+  # =============================================================================
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvironmentName}-EC2-Role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientRootAccess
+                Resource: '*'
+        - PolicyName: CloudFormationSignal
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:SignalResource
+                Resource: '*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${EnvironmentName}-EC2-Profile'
+      Roles:
+        - !Ref InstanceRole
+
+  # =============================================================================
+  # LAUNCH TEMPLATE
+  # =============================================================================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${EnvironmentName}-LaunchTemplate'
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+          - !Ref AppSecurityGroupId
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            
+            # Variables
+            DB_NAME=${DatabaseName}
+            DB_HOSTNAME=${DatabaseEndpoint}
+            DB_USERNAME="admin"
+            DB_PASSWORD="${WordPressAdminPassword}"
+            WP_ADMIN="wpadmin"
+            WP_PASSWORD="${WordPressAdminPassword}"
+            WP_EMAIL="${WordPressAdminEmail}"
+            LB_HOSTNAME="${ApplicationLoadBalancer.DNSName}"
+            EFS_ID="${EFSFileSystemId}"
+            
+            # Update system
+            dnf update -y
+            
+            # Install packages
+            dnf install -y httpd php php-{mysqli,json,xml,mbstring,zip,gd,curl,opcache,intl} amazon-efs-utils
+            
+            # Configure Apache
+            systemctl enable httpd
+            systemctl start httpd
+            
+            # Mount EFS
+            mkdir -p /var/www/html
+            echo "${EFSFileSystemId}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html efs tls,_netdev" >> /etc/fstab
+            mount -a -t efs defaults
+            
+            # Download and configure WordPress only if not already installed
+            if [ ! -f /var/www/html/wp-config.php ]; then
+                cd /tmp
+                wget https://wordpress.org/latest.tar.gz
+                tar xzf latest.tar.gz
+                cp -R wordpress/* /var/www/html/
+                
+                # Create wp-config.php
+                cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+                sed -i "s/database_name_here/$DB_NAME/" /var/www/html/wp-config.php
+                sed -i "s/username_here/$DB_USERNAME/" /var/www/html/wp-config.php
+                sed -i "s/password_here/$DB_PASSWORD/" /var/www/html/wp-config.php
+                sed -i "s/localhost/$DB_HOSTNAME/" /var/www/html/wp-config.php
+                
+                # Set permissions
+                chown -R apache:apache /var/www/html
+                chmod -R 755 /var/www/html
+                
+                # Install WordPress CLI
+                curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+                chmod +x wp-cli.phar
+                mv wp-cli.phar /usr/local/bin/wp
+                
+                # Install WordPress (only if not already installed)
+                cd /var/www/html
+                if ! wp core is-installed --allow-root 2>/dev/null; then
+                    wp core install \
+                        --url="http://$LB_HOSTNAME" \
+                        --title="WordPress on AWS" \
+                        --admin_user="$WP_ADMIN" \
+                        --admin_password="$WP_PASSWORD" \
+                        --admin_email="$WP_EMAIL" \
+                        --allow-root
+                fi
+                
+                # Create .htaccess for pretty permalinks
+                cat > /var/www/html/.htaccess << 'EOF'
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress
+EOF
+                
+                chown apache:apache /var/www/html/.htaccess
+            fi
+            
+            # Configure PHP OpCache
+            cat >> /etc/php.d/10-opcache.ini << 'EOF'
+opcache.file_cache=/var/www/.opcache
+opcache.file_cache_only=1
+opcache.file_cache_consistency_checks=1
+EOF
+            
+            mkdir -p /var/www/.opcache
+            chown -R apache:apache /var/www/.opcache
+            
+            # Restart Apache
+            systemctl restart httpd
+            
+            # Signal CloudFormation
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${EnvironmentName}-WordPress-Instance'
+
+  # =============================================================================
+  # AUTO SCALING GROUP
+  # =============================================================================
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: 2
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvironmentName}-ASG'
+      VPCZoneIdentifier:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-ASG-Instance'
+          PropagateAtLaunch: true
+
+  # =============================================================================
+  # AUTO SCALING POLICIES
+  # =============================================================================
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 300
+      ScalingAdjustment: 1
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 300
+      ScalingAdjustment: -1
+
+  # =============================================================================
+  # CLOUDWATCH ALARMS
+  # =============================================================================
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-High-CPU'
+      AlarmDescription: 'Scale up on high CPU'
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvironmentName}-Low-CPU'
+      AlarmDescription: 'Scale down on low CPU'
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 25
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerDNSName'
+      
+  LoadBalancerHostedZoneID:
+    Description: Load Balancer Hosted Zone ID
+    Value: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerHostedZoneID'
+      
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupArn'
+      
+  AutoScalingGroupName:
+    Description: Auto Scaling Group Name
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AutoScalingGroupName'
