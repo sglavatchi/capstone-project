@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete WordPress Infrastructure - Production Ready'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix for all resources
+    Type: String
+    Default: WP-Production
+    
+  VPCCidr:
+    Description: CIDR block for the VPC
+    Type: String
+    Default: 172.16.0.0/16
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    
+  DBMasterPassword:
+    Description: Master password for Aurora database
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    
+  WordPressAdminPassword:
+    Description: WordPress admin password
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    
+  WordPressAdminEmail:
+    Description: WordPress admin email address
+    Type: String
+    AllowedPattern: ^[^\s@]+@[^\s@]+\.[^\s@]+$
+    
+  InstanceType:
+    Description: EC2 instance type for WordPress servers
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      
+  S3BucketName:
+    Description: S3 bucket name where nested templates are stored
+    Type: String
+    Default: your-cf-templates-bucket
+
+Resources:
+  # =============================================================================
+  # NETWORK STACK
+  # =============================================================================
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/nested-stacks/network-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VPCCidr: !Ref VPCCidr
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Network'
+
+  # =============================================================================
+  # DATABASE STACK
+  # =============================================================================
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/nested-stacks/database-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VPCId: !GetAtt NetworkStack.Outputs.VPCId
+        DatabaseSubnet1Id: !GetAtt NetworkStack.Outputs.DatabaseSubnet1Id
+        DatabaseSubnet2Id: !GetAtt NetworkStack.Outputs.DatabaseSubnet2Id
+        DatabaseSecurityGroupId: !GetAtt NetworkStack.Outputs.DatabaseSecurityGroupId
+        DBMasterPassword: !Ref DBMasterPassword
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Database'
+
+  # =============================================================================
+  # STORAGE STACK (EFS)
+  # =============================================================================
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/nested-stacks/storage-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VPCId: !GetAtt NetworkStack.Outputs.VPCId
+        AppSubnet1Id: !GetAtt NetworkStack.Outputs.AppSubnet1Id
+        AppSubnet2Id: !GetAtt NetworkStack.Outputs.AppSubnet2Id
+        EFSSecurityGroupId: !GetAtt NetworkStack.Outputs.EFSSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Storage'
+
+  # =============================================================================
+  # COMPUTE STACK (ALB + Auto Scaling + Launch Template)
+  # =============================================================================
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - NetworkStack
+      - DatabaseStack
+      - StorageStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/nested-stacks/compute-stack.yaml'
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        VPCId: !GetAtt NetworkStack.Outputs.VPCId
+        PublicSubnet1Id: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        PublicSubnet2Id: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+        AppSubnet1Id: !GetAtt NetworkStack.Outputs.AppSubnet1Id
+        AppSubnet2Id: !GetAtt NetworkStack.Outputs.AppSubnet2Id
+        ALBSecurityGroupId: !GetAtt NetworkStack.Outputs.ALBSecurityGroupId
+        AppSecurityGroupId: !GetAtt NetworkStack.Outputs.AppSecurityGroupId
+        DatabaseEndpoint: !GetAtt DatabaseStack.Outputs.DatabaseEndpoint
+        DatabaseName: !GetAtt DatabaseStack.Outputs.DatabaseName
+        EFSFileSystemId: !GetAtt StorageStack.Outputs.EFSFileSystemId
+        WordPressAdminPassword: !Ref WordPressAdminPassword
+        WordPressAdminEmail: !Ref WordPressAdminEmail
+        InstanceType: !Ref InstanceType
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Compute'
+
+Outputs:
+  # =============================================================================
+  # MASTER STACK OUTPUTS
+  # =============================================================================
+  WordPressURL:
+    Description: WordPress Application URL
+    Value: !Sub 
+      - 'http://${ALBDNSName}'
+      - ALBDNSName: !GetAtt ComputeStack.Outputs.LoadBalancerDNSName
+    Export:
+      Name: !Sub '${EnvironmentName}-WordPressURL'
+      
+  WordPressAdminURL:
+    Description: WordPress Admin URL
+    Value: !Sub 
+      - 'http://${ALBDNSName}/wp-admin'
+      - ALBDNSName: !GetAtt ComputeStack.Outputs.LoadBalancerDNSName
+    Export:
+      Name: !Sub '${EnvironmentName}-WordPressAdminURL'
+      
+  DatabaseEndpoint:
+    Description: Aurora Database Endpoint
+    Value: !GetAtt DatabaseStack.Outputs.DatabaseEndpoint
+    Export:
+      Name: !Sub '${EnvironmentName}-DatabaseEndpoint'
+      
+  EFSFileSystemId:
+    Description: EFS File System ID
+    Value: !GetAtt StorageStack.Outputs.EFSFileSystemId
+    Export:
+      Name: !Sub '${EnvironmentName}-EFSFileSystemId'
+      
+  VPCId:
+    Description: Production VPC ID
+    Value: !GetAtt NetworkStack.Outputs.VPCId
+    Export:
+      Name: !Sub '${EnvironmentName}-VPCId'

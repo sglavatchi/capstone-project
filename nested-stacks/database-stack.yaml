@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Database Stack - Aurora MySQL Cluster for WordPress'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: WP-Production
+    
+  VPCId:
+    Type: String
+    Description: VPC ID from Network Stack
+    
+  DatabaseSubnet1Id:
+    Type: String
+    Description: Database Subnet 1 ID
+    
+  DatabaseSubnet2Id:
+    Type: String
+    Description: Database Subnet 2 ID
+    
+  DatabaseSecurityGroupId:
+    Type: String
+    Description: Database Security Group ID
+    
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    Description: Master password for Aurora database
+
+Resources:
+  # =============================================================================
+  # DATABASE SUBNET GROUP
+  # =============================================================================
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${EnvironmentName}-db-subnet-group'
+      DBSubnetGroupDescription: Subnet group for Aurora database cluster
+      SubnetIds:
+        - !Ref DatabaseSubnet1Id
+        - !Ref DatabaseSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-DB-SubnetGroup'
+
+  # =============================================================================
+  # AURORA CLUSTER
+  # =============================================================================
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Sub '${EnvironmentName}-aurora-cluster'
+      Engine: aurora-mysql
+      EngineVersion: '8.0.mysql_aurora.3.02.0'
+      DatabaseName: WPDatabase
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBMasterPassword
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DatabaseSecurityGroupId
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "07:00-09:00"
+      PreferredMaintenanceWindow: "sun:09:00-sun:11:00"
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Aurora-Cluster'
+
+  # =============================================================================
+  # AURORA INSTANCES
+  # =============================================================================
+  AuroraInstance1:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${EnvironmentName}-aurora-instance-1'
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.t3.medium
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Aurora-Instance-1'
+
+  AuroraInstance2:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${EnvironmentName}-aurora-instance-2'
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.t3.medium
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-Aurora-Instance-2'
+
+Outputs:
+  DatabaseEndpoint:
+    Description: Aurora Cluster Writer Endpoint
+    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabaseEndpoint'
+      
+  DatabasePort:
+    Description: Aurora Database Port
+    Value: !GetAtt AuroraCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabasePort'
+      
+  DatabaseName:
+    Description: Database Name
+    Value: WPDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabaseName'
+      
+  DatabaseUsername:
+    Description: Database Master Username
+    Value: admin
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabaseUsername'

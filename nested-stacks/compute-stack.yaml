@@ -1,0 +1,23 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Compute Stack - Load Balancer, Auto Scaling, Launch Template for WordPress'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: WP-Production
+    
+  VPCId:
+    Type: String
+    Description: VPC ID from Network Stack
+    
+  PublicSubnet1Id:
+    Type: String
+    Description: Public Subnet 1 ID for Load Balancer
+    
+  PublicSubnet2Id:
+    Type: String
+    Description: Public Subnet 2 ID for Load Balancer
+    
+  AppSubnet1Id:
+    Type: String
+    Description: App Subnet 1 ID for Auto Scaling

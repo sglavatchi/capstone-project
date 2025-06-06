@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Storage Stack - EFS File System for WordPress'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: WP-Production
+    
+  VPCId:
+    Type: String
+    Description: VPC ID from Network Stack
+    
+  AppSubnet1Id:
+    Type: String
+    Description: App Subnet 1 ID for EFS Mount Target
+    
+  AppSubnet2Id:
+    Type: String
+    Description: App Subnet 2 ID for EFS Mount Target
+    
+  EFSSecurityGroupId:
+    Type: String
+    Description: EFS Security Group ID
+
+Resources:
+  # =============================================================================
+  # EFS FILE SYSTEM
+  # =============================================================================
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      CreationToken: !Sub '${EnvironmentName}-efs-${AWS::AccountId}'
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-EFS'
+
+  # =============================================================================
+  # EFS MOUNT TARGETS
+  # =============================================================================
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref AppSubnet1Id
+      SecurityGroups:
+        - !Ref EFSSecurityGroupId
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref AppSubnet2Id
+      SecurityGroups:
+        - !Ref EFSSecurityGroupId
+
+  # =============================================================================
+  # EFS ACCESS POINT (Optional - for better security)
+  # =============================================================================
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: "/wordpress"
+        CreationInfo:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: "755"
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-EFS-AccessPoint'
+
+Outputs:
+  EFSFileSystemId:
+    Description: EFS File System ID
+    Value: !Ref EFSFileSystem
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSFileSystemId'
+      
+  EFSAccessPointId:
+    Description: EFS Access Point ID
+    Value: !Ref EFSAccessPoint
+    Export:
+      Name: !Sub '${AWS::StackName}-EFSAccessPointId'
